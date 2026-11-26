@@ -7,6 +7,7 @@
 // Wine) for Signal, Wait, and SetEventOnMultipleFenceCompletion.
 // No game files; exits 77 without a Vulkan device.
 #include "host_wine.h"
+#include "host_adapter.h"
 #include "vk_test_device.h"
 #include "../shims/d3d12_com.h"
 
@@ -60,7 +61,7 @@ bool wait_idle(ID3D12Device* device, ID3D12CommandQueue* queue) {
     return SUCCEEDED(queue->Signal(fence.p, 1)) && SUCCEEDED(fence->SetEventOnCompletion(1, nullptr));
 }
 
-void check_host_parity() {
+void check_host_parity(const LUID* layer_luid) {
     if (hostwine::host_is_wine()) {
         std::printf("SKIP host parity under Wine\n");
         return;
@@ -70,19 +71,10 @@ void check_host_parity() {
         std::printf("SKIP host parity: CreateDXGIFactory2 failed\n");
         return;
     }
-    Ref<IDXGIAdapter1> hw;
-    for (UINT i = 0;; ++i) {
-        Ref<IDXGIAdapter1> cand;
-        if (factory->EnumAdapters1(i, &cand.p) == DXGI_ERROR_NOT_FOUND) break;
-        DXGI_ADAPTER_DESC1 desc{};
-        if (SUCCEEDED(cand->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
-            hw.p = cand.p;
-            cand.p = nullptr;
-            break;
-        }
-    }
-    Ref<IDXGIAdapter1> warp;
-    if (!hw.p || FAILED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp.p)))) {
+    Ref<IDXGIAdapter> hw, warp;
+    std::string hw_name, warp_name;
+    if (!hostadapter::reference(factory.p, layer_luid, false, &hw.p, hw_name) ||
+        !hostadapter::reference(factory.p, layer_luid, true, &warp.p, warp_name)) {
         std::printf("SKIP host parity: need both hardware and WARP adapters\n");
         return;
     }
@@ -326,7 +318,8 @@ int main() {
     check_device_lost_blocking_multi_fence();
 
     // 7. Live Windows D3D12 host parity checks.
-    check_host_parity();
+    const LUID layer_luid = dev_a->GetAdapterLuid();
+    check_host_parity(&layer_luid);
 
     std::printf("%d failure(s)\n", failures);
     return failures ? 1 : 0;

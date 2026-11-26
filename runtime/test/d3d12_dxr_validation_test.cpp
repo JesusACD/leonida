@@ -3,11 +3,14 @@
 // (WARP and native hardware adapter when DXR-capable) and verifies Leonida's strict
 // validation and crash-safety rules with zero Vulkan validation errors.
 // Synthetic resources only; no game content.
+#include "host_adapter.h"
+#include "host_wine.h"
 #include "../shims/d3d12_com.h"
 #include <dxgi1_4.h>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <utility>
 
 namespace {
@@ -637,44 +640,39 @@ int run_suite(ID3D12Device* base_dev, const char* name, bool check_strict_valida
 } // namespace
 
 int main() {
-    // 1. Differential host comparators: Windows WARP and native HW D3D12 (if available and DXR-capable).
-    Ref<IDXGIFactory4> factory;
-    if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(factory.put())))) {
-        Ref<IDXGIAdapter> warp;
-        Ref<ID3D12Device> warp_dev;
-        if (SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(warp.put()))) &&
-            SUCCEEDED(D3D12CreateDevice(warp.p, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(warp_dev.put())))) {
-            const int r = run_suite(warp_dev.p, "native WARP", false);
-            if (r != 0 && r != 77) return r;
-        }
+    // 1. Leonida Vulkan D3D12 device first, so a machine without Vulkan skips before touching host DXGI, and the
+    //    layer's adapter LUID selects the matching hardware D3D12 driver on multi-GPU systems.
+    Ref<ID3D12Device> layer;
+    if (FAILED(rt::d3d12::create_vulkan_device_standalone(IID_PPV_ARGS(layer.put())))) return 77;
+    const LUID layer_luid = layer->GetAdapterLuid();
 
-        Ref<IDXGIAdapter1> hw_adapter;
-        for (UINT i = 0; SUCCEEDED(factory->EnumAdapters1(i, hw_adapter.put())); ++i) {
-            DXGI_ADAPTER_DESC1 desc{};
-            hw_adapter->GetDesc1(&desc);
-            if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
-                hw_adapter.p->Release();
-                hw_adapter.p = nullptr;
-                continue;
-            }
-            Ref<ID3D12Device> hw_dev;
-            if (SUCCEEDED(D3D12CreateDevice(hw_adapter.p, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(hw_dev.put())))) {
-                char adapter_name[128]{};
-                WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, adapter_name, sizeof(adapter_name), nullptr,
-                                    nullptr);
-                char label[160]{};
-                std::snprintf(label, sizeof(label), "native HW (%s)", adapter_name);
-                const int r = run_suite(hw_dev.p, label, false);
+    // 2. Differential host comparators: Windows WARP and native HW D3D12 (selected via host_adapter.h, skipped on Wine).
+    if (!hostwine::host_is_wine()) {
+        Ref<IDXGIFactory4> factory;
+        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(factory.put())))) {
+            for (const bool warp : {true, false}) {
+                Ref<IDXGIAdapter> adapter;
+                std::string adapter_name;
+                if (!hostadapter::reference(factory.p, &layer_luid, warp, adapter.put(), adapter_name,
+                                            D3D_FEATURE_LEVEL_12_1))
+                    continue;
+                Ref<ID3D12Device> host_dev;
+                if (FAILED(D3D12CreateDevice(adapter.p, D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(host_dev.put()))))
+                    continue;
+                if (!warp && hostadapter::wanted().empty()) {
+                    const LUID host_luid = host_dev->GetAdapterLuid();
+                    Ref<IDXGIAdapter1> resolved;
+                    DXGI_ADAPTER_DESC1 desc{};
+                    if (SUCCEEDED(factory->EnumAdapterByLuid(host_luid, IID_PPV_ARGS(resolved.put()))) &&
+                        SUCCEEDED(resolved->GetDesc1(&desc)) && (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
+                        continue;
+                }
+                const std::string label = warp ? "native WARP" : ("native HW (" + adapter_name + ")");
+                const int r = run_suite(host_dev.p, label.c_str(), false);
                 if (r != 0 && r != 77) return r;
-                break;
             }
-            hw_adapter.p->Release();
-            hw_adapter.p = nullptr;
         }
     }
 
-    // 2. Leonida Vulkan D3D12 device (strict validation + GPU BLAS/TLAS build under LEONIDA_VK_VALIDATION=1).
-    Ref<ID3D12Device> layer;
-    if (FAILED(rt::d3d12::create_vulkan_device_standalone(IID_PPV_ARGS(layer.put())))) return 77;
     return run_suite(layer.p, "Leonida Vulkan", true);
 }

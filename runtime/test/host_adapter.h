@@ -71,7 +71,8 @@ inline IDXGIAdapter1* named(IDXGIFactory1* factory, const std::string& needle) {
 // releases (null: the default adapter), and the name the test prints for it. False when the pass has no adapter: no
 // WARP on this PC, or LEONIDA_HOST_ADAPTER=warp on the hardware pass. `luid` is the layer's adapter (null: unknown),
 // for a test whose layer device is the standalone one (ID3D12Device::GetAdapterLuid) rather than a vktest::Device.
-inline bool reference(IDXGIFactory4* factory, const LUID* luid, bool warp, IDXGIAdapter** adapter, std::string& name) {
+inline bool reference(IDXGIFactory4* factory, const LUID* luid, bool warp, IDXGIAdapter** adapter, std::string& name,
+                      D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0) {
     *adapter = nullptr;
     if (warp) {
         name = "WARP";
@@ -81,7 +82,7 @@ inline bool reference(IDXGIFactory4* factory, const LUID* luid, bool warp, IDXGI
     if (needle == "warp") return false;
     if (!needle.empty()) {
         if (IDXGIAdapter1* found = named(factory, needle)) {
-            if (SUCCEEDED(D3D12CreateDevice(found, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), nullptr))) {
+            if (SUCCEEDED(D3D12CreateDevice(found, level, __uuidof(ID3D12Device), nullptr))) {
                 name = description(found);
                 *adapter = found;
                 return true;
@@ -92,8 +93,9 @@ inline bool reference(IDXGIFactory4* factory, const LUID* luid, bool warp, IDXGI
         std::exit(1);
     }
     // With a null device pointer D3D12CreateDevice only says whether the adapter would give one.
-    if (luid && SUCCEEDED(factory->EnumAdapterByLuid(*luid, IID_PPV_ARGS(adapter))) &&
-        SUCCEEDED(D3D12CreateDevice(*adapter, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device), nullptr))) {
+    if (luid && (luid->LowPart || luid->HighPart) &&
+        SUCCEEDED(factory->EnumAdapterByLuid(*luid, IID_PPV_ARGS(adapter))) &&
+        SUCCEEDED(D3D12CreateDevice(*adapter, level, __uuidof(ID3D12Device), nullptr))) {
         name = description(*adapter);
         return true;
     }
@@ -105,7 +107,7 @@ inline bool reference(IDXGIFactory4* factory, const LUID* luid, bool warp, IDXGI
 
 // The same, with the layer's adapter read from its Vulkan device (VkPhysicalDeviceIDProperties::deviceLUID).
 inline bool reference(IDXGIFactory4* factory, const vktest::Device& vk, bool warp, IDXGIAdapter** adapter,
-                      std::string& name) {
+                      std::string& name, D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0) {
     VkPhysicalDeviceIDProperties id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
     VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &id};
     if (vk.physical)
@@ -113,7 +115,7 @@ inline bool reference(IDXGIFactory4* factory, const vktest::Device& vk, bool war
     LUID luid{};
     static_assert(sizeof(luid) == sizeof(id.deviceLUID));
     std::memcpy(&luid, id.deviceLUID, sizeof(luid));
-    return reference(factory, id.deviceLUIDValid ? &luid : nullptr, warp, adapter, name);
+    return reference(factory, id.deviceLUIDValid ? &luid : nullptr, warp, adapter, name, level);
 }
 
 }  // namespace hostadapter

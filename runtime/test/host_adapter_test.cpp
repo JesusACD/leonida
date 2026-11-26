@@ -15,10 +15,11 @@ namespace {
 
 unsigned device_calls = 0;
 bool valid_feature_probe = false;
+D3D_FEATURE_LEVEL expected_level = D3D_FEATURE_LEVEL_11_0;
 
 HRESULT WINAPI reject_device(IUnknown* adapter, D3D_FEATURE_LEVEL level, REFIID iid, void** output) {
     ++device_calls;
-    valid_feature_probe = adapter && level == D3D_FEATURE_LEVEL_11_0 && iid == __uuidof(ID3D12Device) && !output;
+    valid_feature_probe = adapter && level == expected_level && iid == __uuidof(ID3D12Device) && !output;
     if (output) *output = nullptr;
     return E_NOINTERFACE;
 }
@@ -76,7 +77,9 @@ int child(const std::wstring& mode) {
         std::fprintf(stderr, "create_host returned after an explicit nonexistent adapter selection\n");
         return 0;
     }
-    if (mode == L"--unsupported-reference") {
+    if (mode == L"--unsupported-reference" || mode == L"--unsupported-reference-12-1") {
+        const bool level_12_1 = mode == L"--unsupported-reference-12-1";
+        expected_level = level_12_1 ? D3D_FEATURE_LEVEL_12_1 : D3D_FEATURE_LEVEL_11_0;
         copycmp::Ptr<IDXGIFactory4> factory;
         copycmp::Ptr<IDXGIAdapter1> adapter;
         if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory.p))) ||
@@ -91,7 +94,10 @@ int child(const std::wstring& mode) {
         vktest::Device vk;
         IDXGIAdapter* reference = nullptr;
         std::string name;
-        hostadapter::reference(factory.p, vk, false, &reference, name);
+        if (level_12_1)
+            hostadapter::reference(factory.p, vk, false, &reference, name, D3D_FEATURE_LEVEL_12_1);
+        else
+            hostadapter::reference(factory.p, vk, false, &reference, name);
         if (reference) reference->Release();
         std::fprintf(stderr, "reference returned after selecting an adapter without D3D12 support\n");
         return 0;
@@ -148,6 +154,38 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (!exits_fatally(L"--long-selection", false)) ++failures;
     if (!exits_fatally(L"--unsupported-reference", true)) ++failures;
+    if (!exits_fatally(L"--unsupported-reference-12-1", true)) ++failures;
+    {
+        // LUID probe forwards a caller-specified feature level (such as 12_1 for DXR parity) and falls back cleanly
+        // when the stubbed probe refuses that level; a zero LUID skips EnumAdapterByLuid without probing.
+        SetEnvironmentVariableA(variable, nullptr);
+        copycmp::Ptr<IDXGIFactory4> factory;
+        copycmp::Ptr<IDXGIAdapter1> first;
+        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory.p))) &&
+            SUCCEEDED(factory->EnumAdapters1(0, &first.p))) {
+            DXGI_ADAPTER_DESC1 desc{};
+            if (SUCCEEDED(first->GetDesc1(&desc))) {
+                device_calls = 0;
+                valid_feature_probe = false;
+                expected_level = D3D_FEATURE_LEVEL_12_1;
+                IDXGIAdapter* chosen = nullptr;
+                std::string name;
+                const LUID zero{};
+                if (!hostadapter::reference(factory.p, &zero, false, &chosen, name, D3D_FEATURE_LEVEL_12_1) ||
+                    chosen != nullptr || device_calls != 0) {
+                    std::fprintf(stderr, "zero LUID should fall back without probing D3D12CreateDevice\n");
+                    ++failures;
+                }
+                if (!hostadapter::reference(factory.p, &desc.AdapterLuid, false, &chosen, name,
+                                            D3D_FEATURE_LEVEL_12_1) ||
+                    chosen != nullptr || name != "the default adapter" || device_calls != 1 || !valid_feature_probe) {
+                    std::fprintf(stderr, "LUID reference did not probe D3D_FEATURE_LEVEL_12_1 as requested\n");
+                    ++failures;
+                }
+                expected_level = D3D_FEATURE_LEVEL_11_0;
+            }
+        }
+    }
     if (failures) return 1;
     std::puts("host adapter environment and explicit-selection checks passed (no D3D12 device created)");
     return 0;

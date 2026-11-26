@@ -5,6 +5,7 @@
 // 100% generic standard D3D12 API parity; no game data.
 
 #include "vk_test_device.h"
+#include "host_adapter.h"
 #include "host_wine.h"
 #include "../shims/d3d12_com.h"
 
@@ -587,31 +588,37 @@ int main() {
     }
     REQUIRE(test_atomic_copy_gpu(ours.p));
 
-    // 2. Host devices: Windows 11 WARP and native HW D3D12.
+    // 2. Host devices: Windows 11 WARP and native HW D3D12 (selected via host_adapter.h: LEONIDA_HOST_ADAPTER or vk's LUID).
     Ref<ID3D12Device> warp_dev, hw_dev;
     std::string hw_name;
     if (!hostwine::host_is_wine()) {
         Ref<IDXGIFactory4> factory;
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory.p)))) {
             Ref<IDXGIAdapter> warp_adapter;
-            if (SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp_adapter.p)))) {
+            std::string warp_name;
+            if (hostadapter::reference(factory.p, vk, true, &warp_adapter.p, warp_name)) {
                 if (FAILED(D3D12CreateDevice(warp_adapter.p, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&warp_dev.p))))
                     warp_dev.p = nullptr;
             }
-            Ref<IDXGIAdapter1> hw_adapter;
-            for (UINT i = 0; factory->EnumAdapters1(i, &hw_adapter.p) != DXGI_ERROR_NOT_FOUND; ++i) {
-                DXGI_ADAPTER_DESC1 desc{};
-                hw_adapter->GetDesc1(&desc);
-                if (!(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
-                    if (SUCCEEDED(D3D12CreateDevice(hw_adapter.p, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&hw_dev.p)))) {
-                        char buf[256];
-                        std::snprintf(buf, sizeof(buf), "HW: %ls", desc.Description);
-                        hw_name = buf;
-                        break;
+            Ref<IDXGIAdapter> hw_adapter;
+            std::string adapter_name;
+            if (hostadapter::reference(factory.p, vk, false, &hw_adapter.p, adapter_name)) {
+                if (SUCCEEDED(D3D12CreateDevice(hw_adapter.p, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&hw_dev.p)))) {
+                    bool software = false;
+                    if (hostadapter::wanted().empty()) {
+                        const LUID luid = hw_dev->GetAdapterLuid();
+                        Ref<IDXGIAdapter1> resolved;
+                        DXGI_ADAPTER_DESC1 desc{};
+                        software = SUCCEEDED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&resolved.p))) &&
+                                   SUCCEEDED(resolved->GetDesc1(&desc)) && (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
+                    }
+                    if (software) {
+                        hw_dev.p->Release();
+                        hw_dev.p = nullptr;
+                    } else {
+                        hw_name = "HW: " + adapter_name;
                     }
                 }
-                hw_adapter.p->Release();
-                hw_adapter.p = nullptr;
             }
         }
     }
